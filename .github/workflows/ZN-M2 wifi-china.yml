@@ -103,12 +103,19 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: Compile the firmware
-      id: compile
-      run: |
-        cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
+- name: Compile the firmware
+  id: compile
+  run: |
+    cd openwrt
+    echo -e "$(nproc) thread compile"
+    if ! make -j$(nproc); then
+      echo "::error::Parallel build failed, trying single thread..."
+      if ! make -j1; then
+        echo "::error::Single thread build failed, running verbose..."
+        make -j1 V=s
+        exit 1
+      fi
+    fi
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
@@ -125,14 +132,39 @@ jobs:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: openwrt/bin
 
-    - name: Organize files
-      id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-      run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+- name: Verify compilation
+  run: |
+    if [ ! -d "openwrt/bin/targets" ]; then
+      echo "::error::Compilation failed! bin/targets directory not found."
+      echo "::group::Compilation log"
+      cat openwrt/build.log || true
+      echo "::endgroup::"
+      exit 1
+    else
+      echo "Compilation successful"
+      echo "Targets directory contents:"
+      ls -la openwrt/bin/targets/*/*
+    fi
+
+- name: Organize files
+  id: organize
+  if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+  run: |
+    # 使用find命令定位固件目录
+    firmware_path=$(find openwrt/bin/targets -type d -name '*' -print -quit)
+    
+    if [ -z "$firmware_path" ]; then
+      echo "::error::Firmware directory not found in bin/targets!"
+      find openwrt/bin -type d  # 列出所有目录用于调试
+      echo "status=failure" >> $GITHUB_OUTPUT
+      exit 1
+    fi
+    
+    cd "$firmware_path"
+    echo "Current directory: $PWD"
+    rm -rf packages
+    echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+    echo "status=success" >> $GITHUB_OUTPU
 
     - name: Upload firmware directory
       uses: actions/upload-artifact@v4
